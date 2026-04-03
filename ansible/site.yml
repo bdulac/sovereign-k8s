@@ -1,0 +1,73 @@
+- name: Deploy MicroK8s cluster
+  hosts: all
+  become: yes
+
+  vars:
+    k3s_channel: "v1.33.3/stable"
+  tasks:
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install dependencies
+      apt:
+        name:
+          - curl
+        state: present
+
+    - name: Install K3S
+      snap:
+        name: k3s
+        classic: yes
+        channel: "{{ k3s_channel }}"
+
+    - name: Add user to k3s group
+      user:
+        name: "{{ ansible_user }}"
+        groups: k3s
+        append: yes
+
+    - name: Wait for K3S ready
+      command: sudo k3s kubectl wait --for=condition=Ready node --all --timeout=120s
+      retries: 10
+      delay: 15
+      register: result
+      until: result.rc == 0
+
+- name: Bootstrap primary node
+  hosts: master
+  become: yes
+
+  tasks:
+
+    - name: Enable addons
+      command: microk8s enable dns ingress metrics-server
+
+    - name: Get join command
+      command: microk8s add-node
+      register: join_output
+
+    - name: Save join command
+      copy:
+        content: "{{ join_output.stdout }}"
+        dest: /tmp/join-command.txt
+
+- name: Join worker nodes
+  hosts: workers
+  become: yes
+
+  tasks:
+
+    - name: Read join command from master
+      slurp:
+        src: /tmp/join-command.txt
+      register: join_cmd_raw
+      delegate_to: "{{ groups['master'][0] }}"
+
+    - name: Extract join command
+      set_fact:
+        join_cmd: "{{ (join_cmd_raw.content | b64decode).split('\n') | select('search','microk8s join') | list | first }}"
+
+    - name: Join cluster
+      command: "{{ join_cmd }}"
